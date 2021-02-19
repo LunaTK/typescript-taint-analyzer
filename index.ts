@@ -30,7 +30,8 @@ enum Safety {
 }
 
 function delint(sourceFile: ts.SourceFile) {
-    ts.forEachChild(sourceFile, visit);
+    ts.forEachChild(sourceFile, visitAndApplySafety);
+    ts.forEachChild(sourceFile, visitAndCheckRules);
 
     function setSymbolSafety(symbol: ts.Symbol, safety: Safety) {
         (symbol as any).safety = safety;
@@ -48,7 +49,7 @@ function delint(sourceFile: ts.SourceFile) {
         return (signature as any).safety;
     }
 
-    function getExplicitSafety(node: ts.Identifier): Safety | null {
+    function getExplicitSafety(node: ts.Node): Safety | null {
         const trailingComments = ts.getTrailingCommentRanges(sourceFile.text, node.getFullStart() + node.getFullWidth());
     
         for (let cr of trailingComments || []) {
@@ -65,12 +66,13 @@ function delint(sourceFile: ts.SourceFile) {
     }
     
     function getIdentifierSafety(node: ts.Identifier): Safety | null {
-        const explicitSafety = getExplicitSafety(node);
+        // const explicitSafety = getExplicitSafety(node);
         const symbol = getRootSymbol(checker.getSymbolAtLocation(node));
         const symbolSafety = getSymbolSafety(symbol);
 
         //? explicitSafety가 있으면 그걸, 없으면 Declaration에 있는걸 리턴
-        return explicitSafety || symbolSafety;
+        // return explicitSafety || symbolSafety;
+        return symbolSafety;
     }
 
     function getRootSymbol(symbol: ts.Symbol): ts.Symbol {
@@ -89,50 +91,58 @@ function delint(sourceFile: ts.SourceFile) {
     }
     
     function isExpressionUnsafe(expr: ts.Expression): boolean {
-        if (ts.isElementAccessExpression(expr)) {
-
-        } else if (ts.isElementAccessChain(expr)) {
-
-        } else if (ts.isIdentifier(expr)) {
-            return getIdentifierSafety(expr) === Safety.Unsafe;
-        } else if (ts.isBinaryExpression(expr)) {
-            // TODO: BinaryExpression 모든 경우를 커버하는지 확인
-            return isExpressionUnsafe(expr.left) || isExpressionUnsafe(expr.right);
-        } else if (ts.isCallExpression(expr)) {
-            const signature = checker.getResolvedSignature(expr);
-            return getSignatureSafety(signature);
-        } else if (ts.isObjectLiteralExpression(expr)) {
-            //* Unsafe 프로퍼티가 하나라도 있으면
-            for (const prop of expr.properties) {
-                if (getSymbolSafety(prop.symbol) === Safety.Unsafe) return true;
-            }
-            return false;
-        } else if (ts.isPropertyAccessExpression(expr)) {
-            if (ts.isIdentifier(expr.name))
-                return isExpressionUnsafe(expr.name);
-            else //* PrivateIdentifier는 어차피 액세스 불가이니 취급안함
-                return false;
-        } else if (ts.isLiteralKind(expr.kind)) {
-            //* Literal은 모두 Safe
-            return false;
+        const explicitSafety = getExplicitSafety(expr);
+        if (explicitSafety) {
+            if (explicitSafety === Safety.Unsafe) return true;
+            else return false;
         }
-        log.debug(`${getNodeLoc(expr)}: Unhandled expression safety of ${expr.getText()}`);
-        return false;
+        const isUnsafeByRule = (() => {
+            if (ts.isElementAccessExpression(expr)) {
+
+            } else if (ts.isElementAccessChain(expr)) {
+    
+            } else if (ts.isIdentifier(expr)) {
+                return getIdentifierSafety(expr) === Safety.Unsafe;
+            } else if (ts.isBinaryExpression(expr)) {
+                // TODO: BinaryExpression 모든 경우를 커버하는지 확인
+                return isExpressionUnsafe(expr.left) || isExpressionUnsafe(expr.right);
+            } else if (ts.isCallExpression(expr)) {
+                const signature = checker.getResolvedSignature(expr);
+                return getSignatureSafety(signature);
+            } else if (ts.isObjectLiteralExpression(expr)) {
+                //* Unsafe 프로퍼티가 하나라도 있으면
+                for (const prop of expr.properties) {
+                    if (getSymbolSafety(prop.symbol) === Safety.Unsafe) return true;
+                }
+                return false;
+            } else if (ts.isPropertyAccessExpression(expr)) {
+                if (ts.isIdentifier(expr.name))
+                    return isExpressionUnsafe(expr.name);
+                else //* PrivateIdentifier는 어차피 액세스 불가이니 취급안함
+                    return false;
+            } else if (ts.isLiteralKind(expr.kind)) {
+                //* Literal은 모두 Safe
+                return false;
+            }
+            log.debug(`${getNodeLoc(expr)}: Unhandled expression safety of ${expr.getText()}`);
+            return false;
+        })();
+        return isUnsafeByRule;
     }
     
     type DeclarationWithSafety = 
         ts.VariableDeclaration | 
-        ts.ParameterDeclaration |
-        ts.PropertyDeclaration |
-        ts.PropertyAssignment |
-        ts.PropertySignature;
+        ts.ParameterDeclaration | //? 함수 파라미터, 인덱스 시그니쳐 파라미터
+        ts.PropertyDeclaration | //? Class 프로퍼티 선언
+        ts.PropertyAssignment | //? Object Literal 프로퍼티 선언
+        ts.PropertySignature; //? Interface 프로퍼티 선언
 
     function isDeclarationWithSafety(node: ts.Node): node is DeclarationWithSafety {
         return ts.isVariableDeclaration(node) ||
             ts.isParameter(node) ||
-            ts.isPropertyAssignment(node) || //? Object Literal 프로퍼티 선언
-            ts.isPropertyDeclaration(node) || //? Class 프로퍼티 선언
-            ts.isPropertySignature(node); //? Interface 프로퍼티 선언
+            ts.isPropertyAssignment(node) || 
+            ts.isPropertyDeclaration(node) || 
+            ts.isPropertySignature(node); 
     }
 
     function applyDeclaredSafety(node: DeclarationWithSafety) { 
@@ -154,10 +164,25 @@ function delint(sourceFile: ts.SourceFile) {
     const syntaxToKind = (kind: ts.Node["kind"]) => {
         return ts.SyntaxKind[kind];
     }
-    
-    function visit(node: ts.Node) {
+
+    function visitAndApplySafety(node: ts.Node) {
         if (isDeclarationWithSafety(node)) {
             applyDeclaredSafety(node);
+        }
+        ts.forEachChild(node, visitAndApplySafety);
+    }
+    
+    function visitAndCheckRules(node: ts.Node) {
+        if (isDeclarationWithSafety(node) && node.initializer) {
+            const target = node.name;
+            const source = node.initializer;
+
+            if (ts.isIdentifier(target)) {
+                //TODO: target이 Identifier가 아닌 경우 확인
+                if (isExpressionUnsafe(source) && !isExpressionUnsafe(target)) {
+                    report(node, `Unsafe assignment`);
+                }
+            }
         } else if (ts.isAssignmentExpression(node)) {
             const target = node.left;
             const source = node.right;
@@ -191,7 +216,7 @@ function delint(sourceFile: ts.SourceFile) {
             });
         }
 
-        ts.forEachChild(node, visit); 
+        ts.forEachChild(node, visitAndCheckRules); 
     }
 
     function getNodeLoc(node: ts.Node) {
