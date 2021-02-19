@@ -3,6 +3,13 @@ import * as mysql from "mysql2";
 
 let unsafeString /*@Unsafe*/ = "12345";
 
+const uploadedFilesPath = process.env.UPLOADED_FILES_DIR /*@Safe*/;
+mysql.createConnection(uploadedFilesPath);
+
+let ttt /*@Safe*/ = {
+    unsafeField /*@Unsafe*/: "hi"
+} /*@Safe*/
+
 const obj = {
     inner: {
         unsafeProperty /*@Unsafe*/: "12345"
@@ -14,18 +21,13 @@ interface SomeIn {
     val?: string;
 }
 
-let ttt /*@Safe*/ = {
-    unsafeField /*@Unsafe*/: "hi"
-}
-
 const some: SomeIn = {
     hi: "123",
     bye: 123
 }
 
-const tt = some.hi;
+// const tt = some.hi;
 
 some.hi = 123;
 
-mysql.createConnection("");
 
