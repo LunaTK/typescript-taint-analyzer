@@ -3,7 +3,7 @@ import * as mysql from "mysql2";
 
 let unsafeString /*@Unsafe*/ = "12345";
 
-const uploadedFilesPath = process.env.UPLOADED_FILES_DIR /*@Safe*/;
+const uploadedFilesPath = process.env.UPLOADED_FILES_DIR;
 mysql.createConnection(uploadedFilesPath);
 
 let ttt /*@Safe*/ = {
@@ -26,7 +26,7 @@ const some: SomeIn = {
     bye: 123
 }
 
-// const tt = some.hi;
+const tt = some.hi;
 
 some.hi = 123;
 

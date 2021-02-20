@@ -8,7 +8,7 @@ declare global {
     namespace NodeJS {
         interface Process extends EventEmitter {
             env: {
-                [key: string]: string
+                [key/*@Unsafe*/: string]: string
             };
         }
     }

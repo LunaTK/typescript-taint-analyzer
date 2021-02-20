@@ -67,7 +67,8 @@ function delint(sourceFile: ts.SourceFile) {
     
     function getIdentifierSafety(node: ts.Identifier): Safety | null {
         // const explicitSafety = getExplicitSafety(node);
-        const symbol = getRootSymbol(checker.getSymbolAtLocation(node));
+        log.trace(`${getNodeLoc(node)}: getIdentifierSafety`);
+        const symbol = getRootSymbol(checker.getSymbolAtLocation(node), node);
         const symbolSafety = getSymbolSafety(symbol);
 
         //? explicitSafety가 있으면 그걸, 없으면 Declaration에 있는걸 리턴
@@ -75,17 +76,45 @@ function delint(sourceFile: ts.SourceFile) {
         return symbolSafety;
     }
 
-    function getRootSymbol(symbol: ts.Symbol): ts.Symbol {
-        if (!symbol) {
-            log.warn(`Empty symbol detected`);
-            return symbol;
-        }
+    function getRootSymbol(symbol: ts.Symbol, node?: ts.Identifier): ts.Symbol {
+        if (!symbol && node) {
+            //TODO: 지금은 Index Signature 접근인 경우라고만 생각, 다른경우 있는지 확인
+            log.info(`Empty symbol detected, assuming it as IndexSignature`);
 
-        if (ts.isTransientSymbol(symbol)) {
+            const parent = node.parent;
+
+            if (ts.isPropertyAccessExpression(parent)) {
+                const rightmostSymbol = getRightmostSymbol(parent);
+                return rightmostSymbol;
+            }
+            log.warn(`${getNodeLoc(parent)}: Index Signature resolve failed`);
+            return symbol;
+        } else if (ts.isTransientSymbol(symbol)) {
             //TODO: for-loop로 최적화
             return getRootSymbol(symbol.target);
         } else if (symbol.flags & ts.SymbolFlags.Alias) {
             return checker.getAliasedSymbol(symbol);
+        }
+
+        return symbol;
+    }
+
+    function getRightmostSymbol(expr: ts.PropertyAccessExpression): ts.Symbol {
+        const expression = expr.expression; // LHS
+        const name = expr.name; //RHS
+        let symbol = checker.getSymbolAtLocation(name);
+        if (!symbol) {
+            //TODO: 지금은 Index Signature 접근인 경우라고만 생각, 다른경우 있는지 확인
+            if (ts.isPropertyAccessExpression(expression)) {
+                symbol = getRightmostSymbol(expression);
+            } else {
+                symbol = checker.getSymbolAtLocation(expression);
+            }
+            const symbolType = checker.getTypeOfSymbolAtLocation(symbol, expression);
+            //! 현재는 String Index만 고려, Number는 고려하지 않음
+            const info = checker.getIndexInfoOfType(symbolType, ts.IndexKind.String);
+            const identifier = info.declaration.parameters[0].name;
+            return checker.getSymbolAtLocation(identifier);
         }
         return symbol;
     }
