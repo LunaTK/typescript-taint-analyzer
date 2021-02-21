@@ -38,7 +38,7 @@ const options = {
     module: ts.ModuleKind.CommonJS
 };
 
-const filePath = './samples/example1.ts';
+const filePath = './samples/davros.ts';
 // const filePath = './samples/example3.ts';
 const program = ts.createProgram([filePath], options);
 const checker = program.getTypeChecker();
@@ -48,12 +48,13 @@ const log = logger({
     prefix: function (level) {
         return `[${level}]`
     },
-    level: 'trace'
+    level: 'fatal'
 });
 
 function delint(sourceFile: ts.SourceFile) {
     ts.forEachChild(sourceFile, visitAndApplySafety);
-    ts.forEachChild(sourceFile, visitAndCheckRules);
+    if (!sourceFile.isExternal)
+        ts.forEachChild(sourceFile, visitAndCheckRules);
 
     function setSymbolSafety(symbol: ts.Symbol, safety: Safety) {
         symbol.safety = safety;
@@ -90,7 +91,7 @@ function delint(sourceFile: ts.SourceFile) {
     
     function getIdentifierSafety(node: ts.Identifier): Safety | null {
         // const explicitSafety = getExplicitSafety(node);
-        log.debug(`${getNodeLoc(node)}: getIdentifierSafety`);
+        log.trace(`${getNodeLoc(node)}: getIdentifierSafety`);
         const symbol = getSymbolAtLocation(node);
         const symbolSafety = getSymbolSafety(symbol);
 
@@ -100,7 +101,7 @@ function delint(sourceFile: ts.SourceFile) {
     }
 
     function getSymbolAtLocation(node: ts.Node): ts.Symbol {
-        log.debug(`${getNodeLoc(node)}: getSymbolAtLocation`)
+        log.trace(`${getNodeLoc(node)}: getSymbolAtLocation`)
         const symbol = checker.getSymbolAtLocation(node);
         if (ts.isIdentifier(node))
             return getRootSymbol(symbol, node);
@@ -122,9 +123,11 @@ function delint(sourceFile: ts.SourceFile) {
             log.warn(`${getNodeLoc(parent)}: Index Signature resolve failed`);
             return symbol;
         } else if (!symbol) {
+            //? 아마 any 타입, exports 심볼인듯
             log.error(`Failed to resolve symbol`)  
         } else if (ts.isTransientSymbol(symbol)) {
             //TODO: for-loop로 최적화
+            if (!symbol.target) return symbol;
             return getRootSymbol(symbol.target);
         } else if (symbol.flags & ts.SymbolFlags.Alias) {
             return checker.getAliasedSymbol(symbol);
@@ -139,7 +142,13 @@ function delint(sourceFile: ts.SourceFile) {
         let symbol = checker.getSymbolAtLocation(name);
         if (!symbol) {
             //TODO: 지금은 Index Signature 접근인 경우라고만 생각, 다른경우 있는지 확인
-            if (ts.isPropertyAccessExpression(expression)) {
+            if (ts.isCallExpression(expression)) {
+                const signature = checker.getResolvedSignature(expression);
+                const returnType = signature.getReturnType();
+                const info = checker.getIndexInfoOfType(returnType, ts.IndexKind.String);
+                const identifier = info.declaration.parameters[0].name;
+                return checker.getSymbolAtLocation(identifier);
+            } else if (ts.isPropertyAccessExpression(expression)) {
                 symbol = getRightmostSymbol(expression);
             } else {
                 symbol = checker.getSymbolAtLocation(expression);
@@ -147,6 +156,7 @@ function delint(sourceFile: ts.SourceFile) {
             const symbolType = checker.getTypeOfSymbolAtLocation(symbol, expression);
             //! 현재는 String Index만 고려, Number는 고려하지 않음
             const info = checker.getIndexInfoOfType(symbolType, ts.IndexKind.String);
+            if (!info) return null; //! Index Signature가 없으면 any타입에 접근한것으로 가정
             const identifier = info.declaration.parameters[0].name;
             return checker.getSymbolAtLocation(identifier);
         }
@@ -170,7 +180,9 @@ function delint(sourceFile: ts.SourceFile) {
             //TODO: 함수 호출은 따로 처리
             const signature = checker.getResolvedSignature(expr);
             // return getSignatureSafety(signature) === Safety.Unsafe;
-        } else if (ts.isObjectLiteralExpression(expr)) {
+        } else if (ts.isFunctionExpression(expr)) {
+            //TODO: 함수 시그니쳐의 flows도 연결해야하지 않을까?
+        }else if (ts.isObjectLiteralExpression(expr)) {
             for (const prop of expr.properties) {
                 symbols.add(prop.symbol);
             }
@@ -187,50 +199,10 @@ function delint(sourceFile: ts.SourceFile) {
 
     function isCallExpressionUnsafe(callExpr: ts.CallExpression) {
         const signature = checker.getResolvedSignature(callExpr);
-
         if (getSignatureSafety(signature) === Safety.Unsafe) 
             return true;
         return false;
     }
-    
-/*  function isExpressionUnsafe(expr: ts.Expression): boolean {
-        const explicitSafety = getExplicitSafety(expr);
-        if (explicitSafety) {
-            if (explicitSafety === Safety.Unsafe) return true;
-            else return false;
-        }
-        const isUnsafeByRule = (() => {
-            if (ts.isElementAccessExpression(expr) || ts.isElementAccessChain(expr)) {
-
-            } else if (ts.isIdentifier(expr)) {
-                return getIdentifierSafety(expr) === Safety.Unsafe;
-            } else if (ts.isBinaryExpression(expr)) {
-                // TODO: BinaryExpression 모든 경우를 커버하는지 확인
-                // TODO: Ternary도 고려하자
-                return isExpressionUnsafe(expr.left) || isExpressionUnsafe(expr.right);
-            } else if (ts.isCallExpression(expr)) {
-                const signature = checker.getResolvedSignature(expr);
-                return getSignatureSafety(signature) === Safety.Unsafe;
-            } else if (ts.isObjectLiteralExpression(expr)) {
-                //* Unsafe 프로퍼티가 하나라도 있으면
-                for (const prop of expr.properties) {
-                    if (getSymbolSafety(prop.symbol) === Safety.Unsafe) return true;
-                }
-                return false;
-            } else if (ts.isPropertyAccessExpression(expr)) {
-                if (ts.isIdentifier(expr.name))
-                    return isExpressionUnsafe(expr.name);
-                else //* PrivateIdentifier는 어차피 액세스 불가이니 취급안함
-                    return false;
-            } else if (ts.isLiteralKind(expr.kind)) {
-                //* Literal은 모두 Safe
-                return false;
-            }
-            log.debug(`${getNodeLoc(expr)}: Unhandled expression safety of ${expr.getText()}`);
-            return false;
-        })();
-        return isUnsafeByRule;
-    } */
     
     type DeclarationWithSafety = 
         ts.VariableDeclaration | 
@@ -263,28 +235,30 @@ function delint(sourceFile: ts.SourceFile) {
         }
     }
 
-    function connectSafetyFlow(targetNode: ts.Node, target: ts.Symbol, source: ts.Symbol) {
-        log.trace(`${getNodeLoc(targetNode)}: Connect safety flow from ${source.name}`);
+    function connectSafetyFlow(targetNode: ts.Node, sourceNode: ts.Node, target: ts.Symbol, source: ts.Symbol) {
+        if (!target || ! source) return;
+        log.debug(`${getNodeLoc(targetNode)}: Connect safety flow from ${source.name}`);
         if (!source.flowsTo) source.flowsTo = new Set();
         // const target = getSymbolAtLocation(targetNode);
         const newFlow = { symbol: target, node: targetNode };
         source.flowsTo.add(newFlow);
 
         if (source.safety === Safety.Unsafe)
-            propagateUnsafety(newFlow, source);
+            propagateUnsafety(newFlow, source, sourceNode);
     }
 
-    function propagateUnsafety(target: ts.FlowInfo, source: ts.Symbol) {
+    function propagateUnsafety(target: ts.FlowInfo, source: ts.Symbol, sourceNode: ts.Node) {
         if (target.symbol.safety === Safety.Safe) {
-            report(target.node, 
+            report(sourceNode, 
                 `Unsafe "${source?.name}" flows to ${target.symbol.name}`);
             return;
         }
-        log.trace(`${getNodeLoc(target.node)}: Unsafety propagated from ${source.name}`);
+
+        log.debug(`${getNodeLoc(target.node)}: Unsafety propagated from ${source.name}`);
         setSymbolSafety(target.symbol, Safety.Unsafe);
 
         target.symbol.flowsTo?.forEach((flowInfo) => {
-            propagateUnsafety(flowInfo, target.symbol);
+            propagateUnsafety(flowInfo, target.symbol, target.node);
         });
     }
 
@@ -308,7 +282,7 @@ function delint(sourceFile: ts.SourceFile) {
                     const targetSymbol = getSymbolAtLocation(target);
     
                     symbols.forEach(symbol => {
-                        connectSafetyFlow(target, targetSymbol, symbol);
+                        connectSafetyFlow(target, source, targetSymbol, symbol);
                     });
                 } else if (explicitSafety === Safety.Unsafe && getIdentifierSafety(target) === Safety.Safe) {
                     report(node, `Unsafe assignment`);
@@ -324,7 +298,7 @@ function delint(sourceFile: ts.SourceFile) {
                 const symbols = getSymbolsInExpr(source);
     
                 symbols.forEach(symbol => {
-                    connectSafetyFlow(target, targetSymbol, symbol);
+                    connectSafetyFlow(target, source, targetSymbol, symbol);
                 });
             } else if (explicitSafety === Safety.Unsafe && targetSymbol.safety === Safety.Safe) {
                 report(node, `Unsafe assignment`);
@@ -344,29 +318,31 @@ function delint(sourceFile: ts.SourceFile) {
                 symbols.forEach(symbol => {
                     // TODO : connectSafetyFlow 함수버전 구현하기
                     setSignatureSafety(signature, Safety.Unsafe);
-                    log.info(`${getNodeLoc(funcDeclaration)}: Signature of function "${funcDeclaration.name.getText()}" is Unsafe`);
+                    log.info(`${getNodeLoc(funcDeclaration)}: Signature of function "${funcDeclaration.name?.getText()}" is Unsafe`);
                 });
             } else if (explicitSafety === Safety.Unsafe) {
                 setSignatureSafety(signature, Safety.Unsafe);
-                log.info(`${getNodeLoc(funcDeclaration)}: Signature of function "${funcDeclaration.name.getText()}" is Unsafe`);
+                log.info(`${getNodeLoc(funcDeclaration)}: Signature of function "${funcDeclaration.name?.getText()}" is Unsafe`);
             }
         } else if (ts.isCallExpression(node)) {
             //* CallLikeExpression 은 new 도 포함, 여기선 고려하지 않음
             const signature = checker.getResolvedSignature(node);
-            const params = signature.parameters;
-            const args = node.arguments;
-    
-            args.forEach((arg, i) => {
-                const explicitSafety = getExplicitSafety(arg);
-                if (!explicitSafety) {
-                    const symbols = getSymbolsInExpr(arg);
-                    symbols.forEach(symbol => {
-                        connectSafetyFlow(params[i].valueDeclaration, params[i], symbol);
-                    });
-                } else if (explicitSafety === Safety.Unsafe && params[i].safety === Safety.Safe) {
-                    report(arg, `Unsafe assignment`);
-                }
-            });
+            if (signature) {
+                const params = signature.parameters;
+                const args = node.arguments;
+        
+                args.forEach((arg, i) => {
+                    const explicitSafety = getExplicitSafety(arg);
+                    if (!explicitSafety) {
+                        const symbols = getSymbolsInExpr(arg);
+                        symbols.forEach(symbol => {
+                            connectSafetyFlow(params[i]?.valueDeclaration, arg, params[i], symbol);
+                        });
+                    } else if (explicitSafety === Safety.Unsafe && params[i].safety === Safety.Safe) {
+                        report(arg, `Unsafe assignment`);
+                    }
+                });
+            }
         }
 
         ts.forEachChild(node, visitAndCheckRules); 
@@ -397,7 +373,7 @@ program.getSourceFiles().forEach((file) => {
     if (!file.isExternal) {
         // if codebase file
         console.log('Visiting :', file.fileName);
-        delint(file);
     }
+    delint(file);
     // console.log(origins, (<any>file).origins, file.path);
 });
