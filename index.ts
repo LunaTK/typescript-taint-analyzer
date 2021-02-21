@@ -15,19 +15,21 @@ declare module 'byots' {
     }
 
     interface FlowInfo {
-        symbol: ts.Symbol;
+        container: SafetyContainer;
         node: ts.Node;
     }
 
-    interface SafetyContainer {
+    interface ISafetyContainer {
         safety: Safety;
         flowsTo?: ES6Set<FlowInfo>;
         isExternal?: boolean;
     }
 
-    interface Symbol extends SafetyContainer {}
+    interface Symbol extends ISafetyContainer {}
 
-    interface Signature extends SafetyContainer{}
+    interface Signature extends ISafetyContainer{}
+
+    type SafetyContainer = Symbol | Signature;
 }
 
 const options = {
@@ -39,10 +41,11 @@ const options = {
     module: ts.ModuleKind.CommonJS
 };
 
+// const filePath = './samples/example1.ts';
 // const filePath = './samples/davros.ts';
-const filePath = './samples/example1.ts';
 // const filePath = './samples/server-examples.ts';
 // const filePath = './samples/fakeApi.ts';
+const filePath = './samples/stackable.ts';
 const program = ts.createProgram([filePath], options);
 const checker = program.getTypeChecker();
 const printer = ts.createPrinter();
@@ -78,20 +81,24 @@ function delint(sourceFiles: ts.SourceFile[]) {
     })
    
 
-    function setSymbolSafety(symbol: ts.Symbol, safety: Safety) {
-        symbol.safety = safety;
+    function setContainerSafety(container: ts.SafetyContainer, safety: Safety) {
+        container.safety = safety;
     }
     
-    function getSymbolSafety(symbol: ts.Symbol): Safety {
-        return symbol.safety;
+    function getContainerSafety(container: ts.SafetyContainer): Safety {
+        return container.safety;
     }
     
-    function setSignatureSafety(signature: ts.Signature, safety: Safety) {
-        signature.safety = safety;
-    }
-    
-    function getSignatureSafety(signature: ts.Signature) {
-        return signature.safety;
+    function getContainerDisplayName(container: ts.SafetyContainer): string {
+        if (isSymbol(container)) {
+            return container.name;
+        } else {
+            return container.declaration?.getText();
+        }
+
+        function isSymbol(c: ts.SafetyContainer): c is ts.Symbol {
+            return !!((c as any).name);
+        }
     }
 
     function getExplicitSafety(node: ts.Node): Safety | null {
@@ -115,7 +122,7 @@ function delint(sourceFiles: ts.SourceFile[]) {
         // const explicitSafety = getExplicitSafety(node);
         log.trace(`${getNodeLoc(node)}: getIdentifierSafety`);
         const symbol = getSymbolAtLocation(node);
-        const symbolSafety = getSymbolSafety(symbol);
+        const symbolSafety = getContainerSafety(symbol);
 
         //? explicitSafety가 있으면 그걸, 없으면 Declaration에 있는걸 리턴
         // return explicitSafety || symbolSafety;
@@ -187,28 +194,28 @@ function delint(sourceFiles: ts.SourceFile[]) {
         return symbol;
     }
 
-    function getSymbolsInExpr(expr: ts.Expression): Set<ts.Symbol> {
-        let symbols = new Set<ts.Symbol>();
+    function getSafetyContainersInExpr(expr: ts.Expression): Set<ts.SafetyContainer> {
+        let containers = new Set<ts.SafetyContainer>();
         if (ts.isParenthesizedExpression(expr)) {
-            symbols = getSymbolsInExpr(expr.expression);
+            containers = getSafetyContainersInExpr(expr.expression);
         } else if (ts.isTemplateExpression(expr)) {
             expr.templateSpans.forEach(spans => {
-                addAll(getSymbolsInExpr(spans.expression));
+                addAll(getSafetyContainersInExpr(spans.expression));
             });
         } else if (ts.isElementAccessExpression(expr)) {
             //? Element Access는 어떤 필드일지 모르니 모든 심볼과 연결
             const target = expr.expression;
             const type = checker.getTypeAtLocation(target);
-            type.getProperties().forEach(prop => symbols.add(prop));
+            type.getProperties().forEach(prop => containers.add(prop));
         } else if (ts.isElementAccessChain(expr)) {
 
         } else if (ts.isIdentifier(expr)) {
-            symbols.add(getSymbolAtLocation(expr));
+            containers.add(getSymbolAtLocation(expr));
         } else if (ts.isBinaryExpression(expr)) {
             // TODO: BinaryExpression 모든 경우를 커버하는지 확인
             // TODO: Ternary도 고려하자
-            addAll(getSymbolsInExpr(expr.left));
-            addAll(getSymbolsInExpr(expr.right));
+            addAll(getSafetyContainersInExpr(expr.left));
+            addAll(getSafetyContainersInExpr(expr.right));
         } else if (ts.isCallExpression(expr)) {
             //TODO: 현재 String 멤버 함수(ex. replace) 호출만 고려
             const expression = expr.expression; //? 호출 대상
@@ -216,46 +223,42 @@ function delint(sourceFiles: ts.SourceFile[]) {
             if (ts.isPropertyAccessExpression(expression)) { //! String에 대한 연산
                 const type = checker.getTypeAtLocation(expression.expression);
                 if (type && type.flags & ts.TypeFlags.StringLike) {
-                    addAll(getSymbolsInExpr(expression));
-                    addAll(getSymbolsInExpr(expression.expression)); //TODO: String replace 체이닝때문에 한건데 그외경우는 안발생하나?
+                    addAll(getSafetyContainersInExpr(expression));
+                    addAll(getSafetyContainersInExpr(expression.expression)); //TODO: String replace 체이닝때문에 한건데 그외경우는 안발생하나?
                     expr.arguments.forEach(arg => {
-                        addAll(getSymbolsInExpr(arg));
+                        addAll(getSafetyContainersInExpr(arg));
                     });
                 }
             }
-            if ((signature.getDeclaration().flags & ts.NodeFlags.Ambient) || signature.getDeclaration().getSourceFile().isExternal) {
+            const declaration = signature.getDeclaration();
+            if (declaration && (declaration.flags & ts.NodeFlags.Ambient || declaration.getSourceFile().isExternal)) {
+                //? 외부 함수는 argument로 연결
                 expr.arguments.forEach(arg => {
-                    addAll(getSymbolsInExpr(arg));
+                    addAll(getSafetyContainersInExpr(arg));
                 });
-            } else {
-                
+            } else if (signature) {
+                //? 내부 함수는 signature로 연결
+                containers.add(signature);
             }
         } else if (ts.isFunctionExpression(expr)) {
             //TODO: 함수 시그니쳐의 flows도 연결해야하지 않을까?
         }else if (ts.isObjectLiteralExpression(expr)) {
             for (const prop of expr.properties) {
-                symbols.add(prop.symbol);
+                containers.add(prop.symbol);
             }
         } else if (ts.isPropertyAccessExpression(expr)) {
             if (ts.isIdentifier(expr.name))
-                symbols = getSymbolsInExpr(expr.name);
+                containers = getSafetyContainersInExpr(expr.name);
             else //* PrivateIdentifier는 어차피 액세스 불가이니 취급안함
                 ;
         } else if (ts.isLiteralKind(expr.kind)) {
             //* Literal은 Symbol 없음
         }
-        return symbols;
+        return containers;
 
-        function addAll(source: Set<ts.Symbol>) {
-            source.forEach(ele => symbols.add(ele));
+        function addAll(source: Set<ts.SafetyContainer>) {
+            source.forEach(ele => containers.add(ele));
         }
-    }
-
-    function isCallExpressionUnsafe(callExpr: ts.CallExpression) {
-        const signature = checker.getResolvedSignature(callExpr);
-        if (getSignatureSafety(signature) === Safety.Unsafe) 
-            return true;
-        return false;
     }
     
     type DeclarationWithSafety = 
@@ -286,10 +289,10 @@ function delint(sourceFiles: ts.SourceFile[]) {
                 
                 if (explicitSafety !== null) {
                     log.info(`${getNodeLoc(name)}: Symbol "${symbol.name}" is declared to be ${explicitSafety}`)
-                    setSymbolSafety(symbol, explicitSafety);
+                    setContainerSafety(symbol, explicitSafety);
                     if (explicitSafety === Safety.Unsafe)
                         propagateUnsafety({
-                            symbol,
+                            container: symbol,
                             node: name,
                         }, symbol, name);
                 }
@@ -302,36 +305,36 @@ function delint(sourceFiles: ts.SourceFile[]) {
         }
     }
 
-    function connectSafetyFlow(targetNode: ts.Node, sourceNode: ts.Node, target: ts.Symbol, source: ts.Symbol) {
+    function connectSafetyFlow(targetNode: ts.Node, sourceNode: ts.Node, target: ts.SafetyContainer, source: ts.SafetyContainer) {
         if (!target || ! source) return;
         if (target === source) return;
-        log.debug(`${getNodeLoc(targetNode)}: Connect safety flow from ${source.name}`);
+        log.debug(`${getNodeLoc(targetNode)}: Connect safety flow from ${getContainerDisplayName(source)}`);
         analysisResult.totalFlow += 1;
         if (!source.flowsTo) source.flowsTo = new Set();
         // const target = getSymbolAtLocation(targetNode);
-        const newFlow = { symbol: target, node: targetNode };
+        const newFlow = { container: target, node: targetNode };
         source.flowsTo.add(newFlow);
 
         if (source.safety === Safety.Unsafe)
             propagateUnsafety(newFlow, source, sourceNode);
     }
 
-    function propagateUnsafety(target: ts.FlowInfo, source: ts.Symbol, sourceNode: ts.Node) {
-        if (target.symbol.safety === Safety.Safe) {
+    function propagateUnsafety(target: ts.FlowInfo, source: ts.SafetyContainer, sourceNode: ts.Node) {
+        if (target.container.safety === Safety.Safe) {
             report(sourceNode, 
-                `Unsafe "${source?.name}" flows to ${target.symbol.name}`);
+                `Unsafe "${getContainerDisplayName(source)}" flows to "${getContainerDisplayName(target.container)}"`);
             analysisResult.totalPropagation += 1;
             return;
         }
 
-        if (target.symbol.isExternal) return;
+        if (target.container.isExternal) return;
 
-        log.debug(`${getNodeLoc(target.node)}: Unsafety propagated from ${source.name}`);
-        setSymbolSafety(target.symbol, Safety.Unsafe);
+        log.debug(`${getNodeLoc(target.node)}: Unsafety propagated from ${getContainerDisplayName(source)}`);
+        setContainerSafety(target.container, Safety.Unsafe);
         analysisResult.totalPropagation += 1;
 
-        target.symbol.flowsTo?.forEach((flowInfo) => {
-            propagateUnsafety(flowInfo, target.symbol, target.node);
+        target.container.flowsTo?.forEach((flowInfo) => {
+            propagateUnsafety(flowInfo, target.container, target.node);
         });
     }
 
@@ -353,11 +356,11 @@ function delint(sourceFiles: ts.SourceFile[]) {
                 //TODO: target이 Identifier가 아닌 경우 있는지 확인
                 const explicitSafety = getExplicitSafety(source);
                 if (!explicitSafety) { //? Inference & Propagation
-                    const symbols = getSymbolsInExpr(source);
+                    const containers = getSafetyContainersInExpr(source);
                     const targetSymbol = getSymbolAtLocation(target);
     
-                    symbols.forEach(symbol => {
-                        connectSafetyFlow(target, source, targetSymbol, symbol);
+                    containers.forEach(container => {
+                        connectSafetyFlow(target, source, targetSymbol, container);
                     });
                 } else if (explicitSafety === Safety.Unsafe && getIdentifierSafety(target) === Safety.Safe) {
                     report(node, `Unsafe assignment`);
@@ -370,10 +373,10 @@ function delint(sourceFiles: ts.SourceFile[]) {
 
             const explicitSafety = getExplicitSafety(source);
             if (!explicitSafety) {
-                const symbols = getSymbolsInExpr(source);
+                const containers = getSafetyContainersInExpr(source);
     
-                symbols.forEach(symbol => {
-                    connectSafetyFlow(target, source, targetSymbol, symbol);
+                containers.forEach(container => {
+                    connectSafetyFlow(target, source, targetSymbol, container);
                 });
             } else if (explicitSafety === Safety.Unsafe && targetSymbol.safety === Safety.Safe) {
                 report(node, `Unsafe assignment`);
@@ -386,18 +389,21 @@ function delint(sourceFiles: ts.SourceFile[]) {
             if (signature.safety === Safety.Safe) return; //? Explicit Safety있으면 생략
 
             const expr = node.expression;
-            const explicitSafety = getExplicitSafety(expr);
-            if (!explicitSafety) {
-                const symbols = getSymbolsInExpr(expr);
-
-                symbols.forEach(symbol => {
-                    // TODO : connectSafetyFlow 함수버전 구현하기
-                    setSignatureSafety(signature, Safety.Unsafe);
+            if (expr) {
+                const explicitSafety = getExplicitSafety(expr);
+                if (!explicitSafety) {
+                    const containers = getSafetyContainersInExpr(expr);
+    
+                    containers.forEach(container => {
+                        // TODO : connectSafetyFlow 함수버전 구현하기
+                        // setContainerSafety(signature, Safety.Unsafe);
+                        connectSafetyFlow(signature.declaration, expr, signature, container);
+                        log.info(`${getNodeLoc(funcDeclaration)}: Signature of function "${funcDeclaration.name?.getText()}" is Unsafe`);
+                    });
+                } else if (explicitSafety === Safety.Unsafe) {
+                    setContainerSafety(signature, Safety.Unsafe);
                     log.info(`${getNodeLoc(funcDeclaration)}: Signature of function "${funcDeclaration.name?.getText()}" is Unsafe`);
-                });
-            } else if (explicitSafety === Safety.Unsafe) {
-                setSignatureSafety(signature, Safety.Unsafe);
-                log.info(`${getNodeLoc(funcDeclaration)}: Signature of function "${funcDeclaration.name?.getText()}" is Unsafe`);
+                }
             }
         } else if (ts.isCallExpression(node)) {
             //* CallLikeExpression 은 new 도 포함, 여기선 고려하지 않음
@@ -409,9 +415,9 @@ function delint(sourceFiles: ts.SourceFile[]) {
                 args.forEach((arg, i) => {
                     const explicitSafety = getExplicitSafety(arg);
                     if (!explicitSafety) {
-                        const symbols = getSymbolsInExpr(arg);
-                        symbols.forEach(symbol => {
-                            connectSafetyFlow(params[i]?.valueDeclaration, arg, params[i], symbol);
+                        const containers = getSafetyContainersInExpr(arg);
+                        containers.forEach(container => {
+                            connectSafetyFlow(params[i]?.valueDeclaration, arg, params[i], container);
                         });
                     } else if (explicitSafety === Safety.Unsafe && params[i].safety === Safety.Safe) {
                         report(arg, `Unsafe assignment`);
