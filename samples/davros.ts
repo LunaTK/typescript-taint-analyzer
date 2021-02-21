@@ -1,9 +1,5 @@
-/// <reference path="../@types/child-process-promise.d.ts"/>
-// var exec = require('child-process-promise').exec;
 import { exec } from 'child-process-promise';
-// var path = require('path');
 import path = require('path');
-// var url  = require('url');
 import url  = require('url');
 import express = require("express");
 import * as fsp from 'fs-promise';
@@ -36,7 +32,7 @@ exports.getInfo = function(req: express.Request, res: express.Response, next: ex
     return fsp.stat(destination).catch(()=>{});
   }).then((stat) => {
     if(stat) {
-      var sessionId /*@Unsafe*/ = req.headers['x-sandstorm-session-id'];
+      var sessionId = req.headers['x-sandstorm-session-id'];
       return exec("./sandstorm-integration/bin/getPublicId " + sessionId);
     }
   }).then((result) => {
