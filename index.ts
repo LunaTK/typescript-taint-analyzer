@@ -40,8 +40,9 @@ const options = {
 };
 
 // const filePath = './samples/davros.ts';
-// const filePath = './samples/example1.ts';
-const filePath = './samples/server-examples.ts';
+const filePath = './samples/example1.ts';
+// const filePath = './samples/server-examples.ts';
+// const filePath = './samples/fakeApi.ts';
 const program = ts.createProgram([filePath], options);
 const checker = program.getTypeChecker();
 const printer = ts.createPrinter();
@@ -61,12 +62,8 @@ let analysisResult = {
 
 function delint(sourceFiles: ts.SourceFile[]) {
     sourceFiles.forEach(sourceFile => {
-        let origins = 1;
         if (program.isSourceFileFromExternalLibrary(sourceFile)
             || program.isSourceFileDefaultLibrary(sourceFile)) {
-            origins = 0;
-            origins |= program.isSourceFileFromExternalLibrary(sourceFile) ? 2 : 0;
-            origins |= program.isSourceFileDefaultLibrary(sourceFile) ? 4 : 0;
     
             sourceFile.isExternal = true;
         }
@@ -215,15 +212,23 @@ function delint(sourceFiles: ts.SourceFile[]) {
         } else if (ts.isCallExpression(expr)) {
             //TODO: 현재 String 멤버 함수(ex. replace) 호출만 고려
             const expression = expr.expression; //? 호출 대상
-            addAll(getSymbolsInExpr(expression));
-            if (ts.isPropertyAccessExpression(expression)) {
-                addAll(getSymbolsInExpr(expression.expression)); //TODO: String replace 체이닝때문에 한건데 그외경우는 안발생하나?
+            const signature = checker.getResolvedSignature(expr);
+            if (ts.isPropertyAccessExpression(expression)) { //! String에 대한 연산
                 const type = checker.getTypeAtLocation(expression.expression);
                 if (type && type.flags & ts.TypeFlags.StringLike) {
+                    addAll(getSymbolsInExpr(expression));
+                    addAll(getSymbolsInExpr(expression.expression)); //TODO: String replace 체이닝때문에 한건데 그외경우는 안발생하나?
                     expr.arguments.forEach(arg => {
                         addAll(getSymbolsInExpr(arg));
                     });
                 }
+            }
+            if ((signature.getDeclaration().flags & ts.NodeFlags.Ambient) || signature.getDeclaration().getSourceFile().isExternal) {
+                expr.arguments.forEach(arg => {
+                    addAll(getSymbolsInExpr(arg));
+                });
+            } else {
+                
             }
         } else if (ts.isFunctionExpression(expr)) {
             //TODO: 함수 시그니쳐의 flows도 연결해야하지 않을까?
@@ -289,6 +294,11 @@ function delint(sourceFiles: ts.SourceFile[]) {
                         }, symbol, name);
                 }
             // }
+
+            if (ts.isFunctionDeclaration(node)) {
+                const signature = checker.getSignatureFromDeclaration(node);
+                signature.isExternal = symbol.isExternal;
+            }
         }
     }
 
@@ -368,8 +378,6 @@ function delint(sourceFiles: ts.SourceFile[]) {
             } else if (explicitSafety === Safety.Unsafe && targetSymbol.safety === Safety.Safe) {
                 report(node, `Unsafe assignment`);
             }
-        } else if (ts.isFunctionDeclaration(node)) {
-            //TODO: 함수 시그니쳐에 Explicit Safety 있는지
         } else if (ts.isReturnStatement(node)) {
             //* 리턴 값 중 Unsafe가 있으면 함수도 Unsafe
             const funcDeclaration = ts.getContainingFunctionDeclaration(node);
