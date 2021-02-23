@@ -1,6 +1,14 @@
 import * as ts from 'byots';
 import * as logger from "console-log-level";
 
+const log = logger({
+    prefix: function (level) {
+        return `[${level}]`
+    },
+    level: 'debug'
+});
+
+
 enum Safety {
     Safe = "Safe",
     Unsafe = "Unsafe",
@@ -45,17 +53,11 @@ const options = {
 // const filePath = './samples/davros.ts';
 // const filePath = './samples/server-examples.ts';
 // const filePath = './samples/fakeApi.ts';
-const filePath = './samples/stackable.ts';
+// const filePath = './samples/stackable.ts';
+const filePath = './samples/tui-simple.ts';
 const program = ts.createProgram([filePath], options);
 const checker = program.getTypeChecker();
 const printer = ts.createPrinter();
-
-const log = logger({
-    prefix: function (level) {
-        return `[${level}]`
-    },
-    level: 'trace'
-});
 
 let analysisResult = {
     totalFlow: 0,
@@ -93,8 +95,11 @@ function delint(sourceFiles: ts.SourceFile[]) {
         if (isSymbol(container)) {
             return container.name;
         } else {
-            return container.declaration?.getText();
-        }
+            if (container.declaration && !ts.isJSDocSignature(container.declaration))
+                return container.declaration.name?.getText();
+            else
+                return container.declaration?.getText();
+        } 
 
         function isSymbol(c: ts.SafetyContainer): c is ts.Symbol {
             return !!((c as any).name);
@@ -213,9 +218,11 @@ function delint(sourceFiles: ts.SourceFile[]) {
             containers.add(getSymbolAtLocation(expr));
         } else if (ts.isBinaryExpression(expr)) {
             // TODO: BinaryExpression 모든 경우를 커버하는지 확인
-            // TODO: Ternary도 고려하자
             addAll(getSafetyContainersInExpr(expr.left));
             addAll(getSafetyContainersInExpr(expr.right));
+        } else if (ts.isConditionalExpression(expr)) { 
+            addAll(getSafetyContainersInExpr(expr.whenTrue));
+            addAll(getSafetyContainersInExpr(expr.whenFalse));
         } else if (ts.isCallExpression(expr)) {
             //TODO: 현재 String 멤버 함수(ex. replace) 호출만 고려
             const expression = expr.expression; //? 호출 대상
@@ -228,6 +235,16 @@ function delint(sourceFiles: ts.SourceFile[]) {
                     expr.arguments.forEach(arg => {
                         addAll(getSafetyContainersInExpr(arg));
                     });
+                } else if (type && checker.isArrayType(type)) {
+                    const typeArgs: ts.Type[] = (type as any).resolvedTypeArguments;
+                    if (typeArgs && typeArgs[0].flags & ts.TypeFlags.StringLike) {
+                        //! String Array인 경우가 여기에 해당
+                        addAll(getSafetyContainersInExpr(expression));
+                        addAll(getSafetyContainersInExpr(expression.expression));
+                        expr.arguments.forEach(arg => {
+                            addAll(getSafetyContainersInExpr(arg));
+                        });
+                    }
                 }
             }
             const declaration = signature.getDeclaration();
@@ -240,9 +257,10 @@ function delint(sourceFiles: ts.SourceFile[]) {
                 //? 내부 함수는 signature로 연결
                 containers.add(signature);
             }
-        } else if (ts.isFunctionExpression(expr)) {
+        } else if (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr)) {
             //TODO: 함수 시그니쳐의 flows도 연결해야하지 않을까?
-        }else if (ts.isObjectLiteralExpression(expr)) {
+            containers.add(checker.getSignatureFromDeclaration(expr));
+        } else if (ts.isObjectLiteralExpression(expr)) {
             for (const prop of expr.properties) {
                 containers.add(prop.symbol);
             }
@@ -397,8 +415,8 @@ function delint(sourceFiles: ts.SourceFile[]) {
                     containers.forEach(container => {
                         // TODO : connectSafetyFlow 함수버전 구현하기
                         // setContainerSafety(signature, Safety.Unsafe);
-                        connectSafetyFlow(signature.declaration, expr, signature, container);
                         log.info(`${getNodeLoc(funcDeclaration)}: Signature of function "${funcDeclaration.name?.getText()}" is Unsafe`);
+                        connectSafetyFlow(signature.declaration, expr, signature, container);
                     });
                 } else if (explicitSafety === Safety.Unsafe) {
                     setContainerSafety(signature, Safety.Unsafe);
