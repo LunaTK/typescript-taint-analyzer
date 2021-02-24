@@ -49,12 +49,24 @@ const options = {
     module: ts.ModuleKind.CommonJS
 };
 
+
+//! 서버사이드
+// const filePath = './samples/davros.ts'; // 됨
+// const filePath = './samples/server-examples.ts'; // 됨
+// const filePath = './samples/fakeApi.ts'; // 됨
+// const filePath = './samples/isomorphic-tutorial.ts'; // 됨
+// const filePath = './samples/tree_routes.ts'; // 됨
+// const filePath = './samples/labs.ts'; // 됨
+
+//! 클라이언트사이드
+// const filePath = './samples/tui-editor.ts'; // 됨, 타입 정보 불완전
+const filePath = './samples/stackable.ts'; // 됨, 타입 정보 불완전
+
+
 // const filePath = './samples/example1.ts';
-// const filePath = './samples/davros.ts';
-// const filePath = './samples/server-examples.ts';
-// const filePath = './samples/fakeApi.ts';
-// const filePath = './samples/stackable.ts';
-const filePath = './samples/tui-simple.ts';
+// const filePath = './samples/example3.ts';
+// const filePath = './samples/manager.ts';
+// const filePath = './samples/tui-simple.ts';
 const program = ts.createProgram([filePath], options);
 const checker = program.getTypeChecker();
 const printer = ts.createPrinter();
@@ -71,6 +83,9 @@ function delint(sourceFiles: ts.SourceFile[]) {
             || program.isSourceFileDefaultLibrary(sourceFile)) {
     
             sourceFile.isExternal = true;
+            // console.log(`Applying ${sourceFile.fileName}`)
+        } else {
+            console.log();
         }
         ts.forEachChild(sourceFile, visitAndApplySafety);
     });
@@ -91,6 +106,10 @@ function delint(sourceFiles: ts.SourceFile[]) {
         return container.safety;
     }
     
+    function isSymbol(c: ts.SafetyContainer): c is ts.Symbol {
+        return !!((c as any).name);
+    }
+
     function getContainerDisplayName(container: ts.SafetyContainer): string {
         if (isSymbol(container)) {
             return container.name;
@@ -100,10 +119,6 @@ function delint(sourceFiles: ts.SourceFile[]) {
             else
                 return container.declaration?.getText();
         } 
-
-        function isSymbol(c: ts.SafetyContainer): c is ts.Symbol {
-            return !!((c as any).name);
-        }
     }
 
     function getExplicitSafety(node: ts.Node): Safety | null {
@@ -170,14 +185,24 @@ function delint(sourceFiles: ts.SourceFile[]) {
         return symbol;
     }
 
+    function getResolvedSignature(node: ts.CallLikeExpression): ts.Signature {
+        return getRootSignatrue(checker.getResolvedSignature(node));
+
+        function getRootSignatrue(signature: ts.Signature): ts.Signature {
+            if (signature && signature.target) return getRootSignatrue(signature.target);
+            else return signature;
+        }
+    }
+
     function getRightmostSymbol(expr: ts.PropertyAccessExpression): ts.Symbol {
+        //TODO : Any타입에 접근시 가장 오른쪽의 레퍼 가능한 심볼 리턴하게 수정
         const expression = expr.expression; // LHS
         const name = expr.name; //RHS
         let symbol = checker.getSymbolAtLocation(name);
         if (!symbol) {
             //TODO: 지금은 Index Signature 접근인 경우라고만 생각, 다른경우 있는지 확인
             if (ts.isCallExpression(expression)) {
-                const signature = checker.getResolvedSignature(expression);
+                const signature = getResolvedSignature(expression);
                 const returnType = signature.getReturnType();
                 const info = checker.getIndexInfoOfType(returnType, ts.IndexKind.String);
                 if (!info) return null; //! any타입에 접근한것으로 가정
@@ -188,11 +213,11 @@ function delint(sourceFiles: ts.SourceFile[]) {
             } else {
                 symbol = checker.getSymbolAtLocation(expression);
             }
-            if (!symbol) return null; //! 대상이 Any 타입
+            if (!symbol) return symbol; //! 대상이 Any 타입
             const symbolType = checker.getTypeOfSymbolAtLocation(symbol, expression);
             //! 현재는 String Index만 고려, Number는 고려하지 않음
             const info = checker.getIndexInfoOfType(symbolType, ts.IndexKind.String);
-            if (!info) return null; //! Index Signature가 없으면 any타입에 접근한것으로 가정
+            if (!info) return symbol; //! Index Signature가 없으면 any타입에 접근한것으로 가정
             const identifier = info.declaration.parameters[0].name;
             return checker.getSymbolAtLocation(identifier);
         }
@@ -202,6 +227,8 @@ function delint(sourceFiles: ts.SourceFile[]) {
     function getSafetyContainersInExpr(expr: ts.Expression): Set<ts.SafetyContainer> {
         let containers = new Set<ts.SafetyContainer>();
         if (ts.isParenthesizedExpression(expr)) {
+            containers = getSafetyContainersInExpr(expr.expression);
+        } else if (ts.isAsExpression(expr)) {
             containers = getSafetyContainersInExpr(expr.expression);
         } else if (ts.isTemplateExpression(expr)) {
             expr.templateSpans.forEach(spans => {
@@ -226,7 +253,7 @@ function delint(sourceFiles: ts.SourceFile[]) {
         } else if (ts.isCallExpression(expr)) {
             //TODO: 현재 String 멤버 함수(ex. replace) 호출만 고려
             const expression = expr.expression; //? 호출 대상
-            const signature = checker.getResolvedSignature(expr);
+            const signature = getResolvedSignature(expr);
             if (ts.isPropertyAccessExpression(expression)) { //! String에 대한 연산
                 const type = checker.getTypeAtLocation(expression.expression);
                 if (type && type.flags & ts.TypeFlags.StringLike) {
@@ -247,12 +274,18 @@ function delint(sourceFiles: ts.SourceFile[]) {
                     }
                 }
             }
-            const declaration = signature.getDeclaration();
-            if (declaration && (declaration.flags & ts.NodeFlags.Ambient || declaration.getSourceFile().isExternal)) {
-                //? 외부 함수는 argument로 연결
-                expr.arguments.forEach(arg => {
-                    addAll(getSafetyContainersInExpr(arg));
-                });
+            const declaration = signature.declaration;
+            if (!declaration || (declaration.getSourceFile().isExternal || declaration.flags & ts.NodeFlags.Ambient)) {
+                //? 외부 함수인 경우
+                if (signature.safety === Safety.Unsafe) {
+                    containers.add(signature);
+                } else if (signature.safety === Safety.Safe) {
+
+                } else {
+                    expr.arguments.forEach(arg => {
+                        addAll(getSafetyContainersInExpr(arg));
+                    });
+                }
             } else if (signature) {
                 //? 내부 함수는 signature로 연결
                 containers.add(signature);
@@ -285,7 +318,9 @@ function delint(sourceFiles: ts.SourceFile[]) {
         ts.PropertyDeclaration | //? Class 프로퍼티 선언
         ts.PropertyAssignment | //? Object Literal 프로퍼티 선언
         ts.PropertySignature | //? Interface 프로퍼티 선언
-        ts.FunctionDeclaration; 
+        ts.FunctionDeclaration |
+        ts.MethodSignature |
+        ts.MethodDeclaration; 
 
     function isDeclarationWithSafety(node: ts.Node): node is DeclarationWithSafety {
         return ts.isVariableDeclaration(node) ||
@@ -293,7 +328,9 @@ function delint(sourceFiles: ts.SourceFile[]) {
             ts.isPropertyAssignment(node) || 
             ts.isPropertyDeclaration(node) || 
             ts.isPropertySignature(node) ||
-            ts.isFunctionDeclaration(node); 
+            ts.isFunctionDeclaration(node) ||
+            ts.isMethodSignature(node) ||
+            ts.isMethodDeclaration(node); 
     }
 
     function applyExplicitSafety(node: DeclarationWithSafety) { 
@@ -302,28 +339,29 @@ function delint(sourceFiles: ts.SourceFile[]) {
         if (symbol) {
             symbol.isExternal ||= node.getSourceFile().isExternal;
             // TODO: name은 Identifier나 BindingExpression 가능, 현재는 Identifier만 지원
-            // if (name.kind === ts.SyntaxKind.Identifier) {
-                const explicitSafety = getExplicitSafety(name as ts.Identifier);
-                
-                if (explicitSafety !== null) {
-                    log.info(`${getNodeLoc(name)}: Symbol "${symbol.name}" is declared to be ${explicitSafety}`)
-                    setContainerSafety(symbol, explicitSafety);
-                    if (explicitSafety === Safety.Unsafe)
-                        propagateUnsafety({
-                            container: symbol,
-                            node: name,
-                        }, symbol, name);
-                }
-            // }
+            const explicitSafety = getExplicitSafety(name as ts.Identifier);
+            
+            if (explicitSafety !== null) {
+                log.info(`${getNodeLoc(name)}: Symbol "${symbol.name}" is declared to be ${explicitSafety}`)
+                setContainerSafety(symbol, explicitSafety);
+                if (explicitSafety === Safety.Unsafe)
+                    propagateUnsafety({
+                        container: symbol,
+                        node: name,
+                    }, symbol, name);
+            }
 
-            if (ts.isFunctionDeclaration(node)) {
+            if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isMethodSignature(node)) {
                 const signature = checker.getSignatureFromDeclaration(node);
                 signature.isExternal = symbol.isExternal;
+                if (explicitSafety !== null) setContainerSafety(signature, explicitSafety);
             }
         }
     }
 
     function connectSafetyFlow(targetNode: ts.Node, sourceNode: ts.Node, target: ts.SafetyContainer, source: ts.SafetyContainer) {
+        if (target && isSymbol(target)) target = getRootSymbol(target);
+        if (source && isSymbol(source)) source = getRootSymbol(source);
         if (!target || ! source) return;
         if (target === source) return;
         log.debug(`${getNodeLoc(targetNode)}: Connect safety flow from ${getContainerDisplayName(source)}`);
@@ -346,6 +384,7 @@ function delint(sourceFiles: ts.SourceFile[]) {
         }
 
         if (target.container.isExternal) return;
+        if (target.container.safety === Safety.Unsafe) return;
 
         log.debug(`${getNodeLoc(target.node)}: Unsafety propagated from ${getContainerDisplayName(source)}`);
         setContainerSafety(target.container, Safety.Unsafe);
@@ -365,7 +404,7 @@ function delint(sourceFiles: ts.SourceFile[]) {
     
     function visitAndCheckRules(node: ts.Node) {
         if (isDeclarationWithSafety(node) 
-            && !ts.isFunctionDeclaration(node) 
+            && !(ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isMethodSignature(node))
             && node.initializer) {
             const target = node.name;
             const source = node.initializer;
@@ -425,8 +464,8 @@ function delint(sourceFiles: ts.SourceFile[]) {
             }
         } else if (ts.isCallExpression(node)) {
             //* CallLikeExpression 은 new 도 포함, 여기선 고려하지 않음
-            const signature = checker.getResolvedSignature(node);
-            if (signature) {
+            const signature = getResolvedSignature(node);
+            if (signature.declaration) {
                 const params = signature.parameters;
                 const args = node.arguments;
         
@@ -441,6 +480,8 @@ function delint(sourceFiles: ts.SourceFile[]) {
                         report(arg, `Unsafe assignment`);
                     }
                 });
+            } else {
+                log.fatal(`${getNodeLoc(node)}: CallExpression Signature not found`);
             }
         }
 

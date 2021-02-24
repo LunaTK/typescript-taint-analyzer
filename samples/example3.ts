@@ -1,15 +1,14 @@
-let myString: string = 'someThing';
+import express = require('express');
+import * as path from 'path';
+import * as jsonfile from 'jsonfile';
 
-let myString2 /*@Unsafe*/ : string = myString;
+const some /*@Unsafe*/=1;
 
-myString = "aa" + myString2 /*@Safe*/;
-
-function someFun(a /*@Safe*/: string) {
-    return a;
+function readFile(file/*Unsafe*/: string): Promise<any> {
+    return Promise.resolve('');
 }
 
-function someFun2(a /*@Unsafe*/) {
-    return a;
+function ttt(req: express.Request) {
+    const srcPath = path.join("homedir()", req.body.repoName, req.body.labName);
+    jsonfile.readFile(path.join(srcPath, 'labels.json'));
 }
-
-someFun(someFun2(myString2));
