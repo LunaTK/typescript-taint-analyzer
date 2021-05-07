@@ -4,7 +4,6 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "jest",
     "build": "tsc index.ts",
     "start": "ts-node index.ts",
     "debug": "npx /Users/LunaTK/Developer/TypeScript/built/local/tsc.js index.ts"

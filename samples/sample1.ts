@@ -5,3 +5,5 @@ function query(sql /*@Safe*/: string) {
 const userInput /*@Unsafe*/ = 'some unsafe string';
 
 query(userInput);
+
+query(`select ${userInput} from db;`);

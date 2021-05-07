@@ -54,7 +54,7 @@ if (process.argv.length < 3) {
     process.exit(1);
 }
 
-const filePath = process.argv[2];
+const filePath = process.argv[process.argv.length-1];
 const program = ts.createProgram([filePath], options);
 const checker = program.getTypeChecker();
 const printer = ts.createPrinter();
