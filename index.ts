@@ -1,13 +1,13 @@
 import * as ts from 'byots';
 import * as logger from "console-log-level";
+import 'process';
 
 const log = logger({
     prefix: function (level) {
         return `[${level}]`
     },
-    level: 'debug'
+    level: 'info'
 });
-
 
 enum Safety {
     Safe = "Safe",
@@ -49,24 +49,12 @@ const options = {
     module: ts.ModuleKind.CommonJS
 };
 
+if (process.argv.length < 3) {
+    console.error('Usage: npx ts-node index.ts TARGET');
+    process.exit(1);
+}
 
-//! 서버사이드
-// const filePath = './samples/davros.ts'; // 됨
-// const filePath = './samples/server-examples.ts'; // 됨
-// const filePath = './samples/fakeApi.ts'; // 됨
-// const filePath = './samples/isomorphic-tutorial.ts'; // 됨
-// const filePath = './samples/tree_routes.ts'; // 됨
-// const filePath = './samples/labs.ts'; // 됨
-
-//! 클라이언트사이드
-// const filePath = './samples/tui-editor.ts'; // 됨, 타입 정보 불완전
-const filePath = './samples/stackable.ts'; // 됨, 타입 정보 불완전
-
-
-// const filePath = './samples/example1.ts';
-// const filePath = './samples/example3.ts';
-// const filePath = './samples/manager.ts';
-// const filePath = './samples/tui-simple.ts';
+const filePath = process.argv[2];
 const program = ts.createProgram([filePath], options);
 const checker = program.getTypeChecker();
 const printer = ts.createPrinter();
