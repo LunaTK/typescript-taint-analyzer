@@ -7,3 +7,5 @@ const userInput /*@Unsafe*/ = 'some unsafe string';
 query(userInput);
 
 query(`select ${userInput} from db;`);
+
+query(`select ${userInput} from db;` /*@Safe*/);
